@@ -3,125 +3,86 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <sys/types.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <stdlib.h>
 
-int main(int argc, char *argv[])
-{
-    int opt;
-    int blocks = 0;
-    int inodes = 0;
-    char *disk = NULL;
-
-    while ((opt = getopt(argc, argv, "d:i:b:")) != -1)
-    {
-        switch (opt)
-        {
-        case 'd':
-            disk = optarg;
-            break;
-
-        case 'i':
-            inodes = atoi(optarg);
-            int mod1 = inodes % 32;
-            if (mod1 != 0)
-            {
-                inodes += 32 - mod1;
-            }
-            break;
+int main(int argc, char *argv[]){
+    int mayb;
+    int N = 0;
+    int mul = 32;
+    char *storage_device = NULL;
+    int B = 0;
+    while ((mayb = getopt(argc, argv, "d:i:b:")) != -1){
+        switch (mayb) {
         case 'b':
-            blocks = atoi(optarg);
-            int mod = blocks % 32;
-            if (mod != 0)
-            {
-                blocks += 32 - mod;
+            B = atoi(optarg);
+            if ((B%mul) != 0) {
+                B += mul - (B%mul);
             }
             break;
-        default:
+        case 'i':
+            N = atoi(optarg);
+            if ((N % mul) != 0){
+                N += mul - (N % mul);
+            }
+            break;
+        case 'd':
+            storage_device = optarg;
             break;
         }
     }
-
-    if (disk == NULL || inodes == 0 || blocks == 0)
-    {
-        printf("Usage: mkfs -d <disk> -i <inodes> -b <blocks>\n");
-        return -1;
+    int df = open(storage_device, O_RDWR | O_CREAT, 0644);
+    size_t storeSize, totalBytes, totalBlocks, totalBits;
+    storeSize = sizeof(struct wfs_sb);
+    size_t stsize = sizeof(unsigned char);
+    totalBytes = (N + 7)/8;
+    size_t bbblocks = B*BLOCK_SIZE;
+    totalBlocks = (N*BLOCK_SIZE);
+    size_t tb = B/8;
+    totalBits = (B+7)/8;
+    struct stat holdInfo;
+    fstat(df, &holdInfo);
+    size_t m = storeSize+totalBytes+totalBits+totalBlocks+bbblocks;
+    if (m > holdInfo.st_size) {
+       close(df); 
+       return -ENOSPC;
     }
+    struct wfs_sb filesystem_info = {
+        .d_bitmap_ptr = storeSize + totalBytes, .num_data_blocks = B,
+        .i_blocks_ptr = storeSize + totalBytes + totalBits, .num_inodes = N,
+        .d_blocks_ptr = storeSize + totalBytes + totalBits + totalBlocks, .i_bitmap_ptr = storeSize
+    };
 
-    int disk_file = open(disk, O_RDWR | O_CREAT, 0666);
-    if (disk_file == -1)
-    {
-        perror("open");
-        return -1;
-    }
+    lseek(df, 0, SEEK_SET);
+    write(df, &filesystem_info, storeSize);
+    lseek(df, filesystem_info.i_bitmap_ptr, SEEK_SET);
+    unsigned char *all = (unsigned char *)calloc(totalBytes, stsize);
+    all[0] |= 0x01;
+    write(df, all, totalBytes);
+    free(all);
+    lseek(df, filesystem_info.d_bitmap_ptr, SEEK_SET);
+    unsigned char *dall = (unsigned char *)calloc(tb, stsize);
+    dall[0] |= 0x01;
+    write(df, dall, tb);
+    free(dall);
 
-    // ensure disk is large enough
-    size_t required_size = sizeof(struct wfs_sb) + (inodes + 7) / 8 + (blocks + 7) / 8 + (inodes * BLOCK_SIZE) + blocks * BLOCK_SIZE;
+    lseek(df, filesystem_info.i_blocks_ptr, SEEK_SET);
+    struct wfs_inode main_directory_inode = {
+        .size = BLOCK_SIZE, .atim = time(NULL), .nlinks = 2, .ctim = time(NULL),
+        .mode = __S_IFDIR | 0755, .gid = getgid(), .num = 0, .mtim = time(NULL),
+        .uid = getuid()};
 
-    struct stat st;
-    fstat(disk_file, &st);
-    if (st.st_size < required_size)
-    {
-        perror("Disk is too small");
-        return 1;
-    }
+    main_directory_inode.blocks[0] = filesystem_info.d_blocks_ptr;
+    write(df, &main_directory_inode, sizeof(struct wfs_inode));
+    off_t i = filesystem_info.i_blocks_ptr + BLOCK_SIZE;
+    off_t j = lseek(df, 0, SEEK_END);
+    lseek(df, i, SEEK_SET);
 
-    struct wfs_sb superblock =
-        {
-            .num_inodes = inodes,
-            .num_data_blocks = blocks,
-            .i_bitmap_ptr = sizeof(struct wfs_sb),
-            .d_bitmap_ptr = sizeof(struct wfs_sb) + (inodes + 7) / 8,
-            .i_blocks_ptr = sizeof(struct wfs_sb) + (inodes + 7) / 8 + (blocks + 7) / 8,
-            .d_blocks_ptr = sizeof(struct wfs_sb) + (inodes + 7) / 8 + (blocks + 7) / 8 + (inodes * BLOCK_SIZE)};
-
-    // write superblock to disk
-    lseek(disk_file, 0, SEEK_SET);
-    write(disk_file, &superblock, sizeof(struct wfs_sb));
-
-    // write inode bitmap to disk
-    lseek(disk_file, superblock.i_bitmap_ptr, SEEK_SET);
-    int numIbytes = (inodes + 7) / 8;
-    unsigned char *i_bitmap = (unsigned char *)calloc(numIbytes, sizeof(unsigned char));
-    // set first bit to 1
-    i_bitmap[0] |= 0x01;
-    write(disk_file, i_bitmap, numIbytes);
-    free(i_bitmap);
-
-    // write data bitmap to disk
-    lseek(disk_file, superblock.d_bitmap_ptr, SEEK_SET);
-    int numDbytes = (blocks) / 8;
-    unsigned char *d_bitmap = (unsigned char *)calloc(numDbytes, sizeof(unsigned char));
-    d_bitmap[0] |= 0x01;
-    write(disk_file, d_bitmap, numDbytes);
-    free(d_bitmap);
-
-    // write root inode to disk
-    lseek(disk_file, superblock.i_blocks_ptr, SEEK_SET);
-    struct wfs_inode root_inode =
-        {
-            .num = 0,
-            .mode = __S_IFDIR | 0755,
-            .uid = getuid(),
-            .gid = getgid(),
-            .size = BLOCK_SIZE,
-            .nlinks = 2,
-            .atim = time(NULL),
-            .mtim = time(NULL),
-            .ctim = time(NULL)};
-    root_inode.blocks[0] = superblock.d_blocks_ptr;
-    write(disk_file, &root_inode, sizeof(struct wfs_inode));
-
-    // set rest of disk to 0
-    off_t current_position = superblock.i_blocks_ptr + BLOCK_SIZE;
-    off_t end_position = lseek(disk_file, 0, SEEK_END);
-    lseek(disk_file, current_position, SEEK_SET);
-
-    size_t remaining_size = end_position - current_position;
-    void *zero_buffer = calloc(1, remaining_size);
-    write(disk_file, zero_buffer, remaining_size);
-    free(zero_buffer);
-
-    close(disk_file);
+    size_t done = j - i;
+    void *last = calloc(1, done);
+    write(df, last, done);
+    free(last);
+    close(df);
     return 0;
 }
