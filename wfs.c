@@ -12,50 +12,6 @@
 char *disk;
 struct wfs_sb *sb;
 
-off_t make_block()
-{
-    int i;
-    char *bitmap_offset;
-    int bit_index;
-    int bit_status;
-    int total_data_blocks = sb->num_data_blocks;
-
-    for (i = 0; i < total_data_blocks; i++)
-    {
-        bitmap_offset = disk + sb->d_bitmap_ptr + (i >> 3);
-        bit_index = i & 7;
-
-        bit_status = (*bitmap_offset >> bit_index) & 1;
-
-        if (!bit_status)
-        {
-            int new_value = 1 << bit_index;
-            *bitmap_offset = *bitmap_offset | new_value;
-
-            off_t block_address = sb->d_blocks_ptr + i * BLOCK_SIZE;
-            return block_address;
-        }
-    }
-
-    return (off_t)(-1);
-}
-
-void free_block(off_t block)
-{
-    int blockIndex = (block - sb->d_blocks_ptr) / BLOCK_SIZE;
-    char *bitmapOffset = disk + sb->d_bitmap_ptr + (blockIndex >> 3);
-    char *zeroedBlock = calloc(1, BLOCK_SIZE);
-
-    if (zeroedBlock)
-    {
-        write(block, zeroedBlock, BLOCK_SIZE);
-        free(zeroedBlock);
-    }
-
-    int bitMask = 1 << (blockIndex & 7);
-    *bitmapOffset &= ~bitMask;
-}
-
 int resize_inode(int newSize, struct wfs_inode *inode)
 {
     int requiredBlocks = (newSize + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -125,6 +81,50 @@ void remove_inode(int inodeIndex)
     }
 
     *bitmapOffset &= ~(1 << bitPosition);
+}
+
+off_t make_block()
+{
+    int i;
+    char *bitmap_offset;
+    int bit_index;
+    int bit_status;
+    int total_data_blocks = sb->num_data_blocks;
+
+    for (i = 0; i < total_data_blocks; i++)
+    {
+        bitmap_offset = disk + sb->d_bitmap_ptr + (i >> 3);
+        bit_index = i & 7;
+
+        bit_status = (*bitmap_offset >> bit_index) & 1;
+
+        if (!bit_status)
+        {
+            int new_value = 1 << bit_index;
+            *bitmap_offset = *bitmap_offset | new_value;
+
+            off_t block_address = sb->d_blocks_ptr + i * BLOCK_SIZE;
+            return block_address;
+        }
+    }
+
+    return (off_t)(-1);
+}
+
+void free_block(off_t block)
+{
+    int blockIndex = (block - sb->d_blocks_ptr) / BLOCK_SIZE;
+    char *bitmapOffset = disk + sb->d_bitmap_ptr + (blockIndex >> 3);
+    char *zeroedBlock = calloc(1, BLOCK_SIZE);
+
+    if (zeroedBlock)
+    {
+        write(block, zeroedBlock, BLOCK_SIZE);
+        free(zeroedBlock);
+    }
+
+    int bitMask = 1 << (blockIndex & 7);
+    *bitmapOffset &= ~bitMask;
 }
 
 struct wfs_inode *get_inode(const char *path)
