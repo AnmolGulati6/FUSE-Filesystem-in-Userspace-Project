@@ -13,6 +13,22 @@
 char *disk;
 struct wfs_sb *sb;
 
+void free_block(off_t block)
+{
+    int blockIndex = (block - sb->d_blocks_ptr) / BLOCK_SIZE;
+    char *bitmapOffset = disk + sb->d_bitmap_ptr + (blockIndex >> 3);
+    char *zeroedBlock = calloc(1, BLOCK_SIZE);
+
+    if (zeroedBlock)
+    {
+        write(block, zeroedBlock, BLOCK_SIZE);
+        free(zeroedBlock);
+    }
+
+    int bitMask = 1 << (blockIndex & 7);
+    *bitmapOffset &= ~bitMask;
+}
+
 off_t make_block()
 {
     int i;
@@ -41,66 +57,67 @@ off_t make_block()
     return (off_t)(-1);
 }
 
-void free_block(off_t block)
+static int calculate_required_blocks(int size)
 {
-    int blockIndex = (block - sb->d_blocks_ptr) / BLOCK_SIZE;
-    char *bitmapOffset = disk + sb->d_bitmap_ptr + (blockIndex >> 3);
-    char *zeroedBlock = calloc(1, BLOCK_SIZE);
+    return (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+}
 
-    if (zeroedBlock)
+static void free_excess_blocks(struct wfs_inode *inode, int requiredBlocks, int existingBlocks)
+{
+    for (int i = requiredBlocks; i < existingBlocks; i++)
     {
-        write(block, zeroedBlock, BLOCK_SIZE);
-        free(zeroedBlock);
+        free_block(inode->blocks[i]);
+        inode->blocks[i] = 0;
+    }
+}
+
+static int allocate_additional_blocks(struct wfs_inode *inode, int existingBlocks, int requiredBlocks)
+{
+    if (requiredBlocks > D_BLOCK && inode->blocks[D_BLOCK] == 0)
+    {
+        off_t newBlock = make_block();
+        if (newBlock == -1)
+            return -1;
+        inode->blocks[D_BLOCK] = newBlock;
     }
 
-    int bitMask = 1 << (blockIndex & 7);
-    *bitmapOffset &= ~bitMask;
+    for (int i = existingBlocks; i < requiredBlocks; i++)
+    {
+        off_t newBlock = make_block();
+        if (newBlock == -1)
+            return -1;
+
+        if (i < D_BLOCK)
+        {
+            inode->blocks[i] = newBlock;
+        }
+        else
+        {
+            char *indirectBlock = disk + inode->blocks[D_BLOCK];
+            off_t *indirectBlockPtr = (off_t *)indirectBlock;
+            indirectBlockPtr[i - D_BLOCK] = newBlock;
+        }
+    }
+    return 0;
 }
 
 int resize_inode(int newSize, struct wfs_inode *inode)
 {
-    int requiredBlocks = (newSize + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    int existingBlocks = (inode->size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int requiredBlocks = calculate_required_blocks(newSize);
+    int existingBlocks = calculate_required_blocks(inode->size);
 
     if (requiredBlocks == existingBlocks)
         return 0;
 
     if (requiredBlocks < existingBlocks)
     {
-        for (int i = requiredBlocks; i < existingBlocks; i++)
-        {
-            free_block(inode->blocks[i]);
-            inode->blocks[i] = 0;
-        }
+        free_excess_blocks(inode, requiredBlocks, existingBlocks);
     }
     else
     {
-        if (requiredBlocks > D_BLOCK)
-        {
-            if (inode->blocks[D_BLOCK] == 0)
-            {
-                off_t newBlock = make_block();
-                if (newBlock == -1)
-                    return -1;
-
-                inode->blocks[D_BLOCK] = newBlock;
-            }
-        }
-        for (int i = existingBlocks; i < requiredBlocks; i++)
-        {
-            off_t newBlock = make_block();
-            if (newBlock == -1)
-                return -1;
-
-            if (i < D_BLOCK)
-                inode->blocks[i] = newBlock;
-            else
-            {
-                char *indirectBlock = disk + inode->blocks[D_BLOCK];
-                off_t *indirectBlockPtr = (off_t *)indirectBlock;
-                indirectBlockPtr[i - D_BLOCK] = newBlock;
-            }
-        }
+        int status = allocate_additional_blocks(inode, existingBlocks, requiredBlocks);
+        if (status != 0)
+            return -1;
     }
 
     inode->size = newSize;
@@ -351,7 +368,7 @@ struct wfs_inode *allocate_inode(int size, const char *path)
     }
 
     const char *finalToken = strrchr(path, '/');
-    finalToken = finalToken ? finalToken + 1 : path; // finalToken is correctly declared as const
+    finalToken = finalToken ? finalToken + 1 : path;
 
     int inodeIndex = find_free_inode();
     if (inodeIndex == -1)
@@ -507,7 +524,7 @@ static int validate_inode_with_offset(struct wfs_inode *inode, off_t offset)
     }
     if (offset >= inode->size)
     {
-        return 0; // Attempting to read beyond the end of the file, return 0 to indicate EOF.
+        return 0;
     }
     return 1;
 }
@@ -653,10 +670,10 @@ static int process_directory_entries(struct wfs_inode *dirInode, void *buf, fuse
         for (int j = 0; j < entriesPerBlock; j++)
         {
             if (entries[j].num != 0)
-            { // Check if the directory entry is used
+            {
                 if (filler(buf, entries[j].name, NULL, 0))
                 {
-                    return 1; // Break out if filler function indicates to stop
+                    return 1;
                 }
             }
         }
@@ -669,17 +686,17 @@ static int wfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_
     struct wfs_inode *dirInode = get_inode(path);
     if (!dirInode)
     {
-        return -ENOENT; // No such directory
+        return -ENOENT;
     }
 
     if (!is_directory(dirInode))
     {
-        return -ENOTDIR; // Not a directory
+        return -ENOTDIR;
     }
 
     if (process_directory_entries(dirInode, buf, filler))
     {
-        return 0; // Early exit if filler requests to stop processing
+        return 0;
     }
 
     return 0;
@@ -758,8 +775,8 @@ int main(int argc, char *argv[])
     if (disk == NULL)
         return -1;
 
-    close(fd);                  // Close file descriptor after successful mapping
-    sb = (struct wfs_sb *)disk; // Set global superblock pointer
+    close(fd);
+    sb = (struct wfs_sb *)disk;
 
-    return fuse_main(argc - 1, argv + 1, &ops, NULL); // Launch FUSE
+    return fuse_main(argc - 1, argv + 1, &ops, NULL);
 }
