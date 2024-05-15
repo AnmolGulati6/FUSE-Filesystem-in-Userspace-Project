@@ -1,8 +1,3 @@
-### FUSE (Filesystem in Userspace) Project
-
-#### Short Description:
-FUSE (Filesystem in Userspace) is a framework enabling the development of custom filesystems in user space, eliminating the need for kernel modifications. This project provides a comprehensive guide and codebase for creating a FUSE-based filesystem in C. It covers filesystem operations like creating files and directories, reading and writing data, removing files and directories, and retrieving file attributes.
-
 #### Readme File:
 
 ## FUSE (Filesystem in Userspace) Project
